@@ -1,0 +1,136 @@
+---
+# General nginx compilation guide
+# https://www.nginx.com/resources/admin-guide/installing-nginx-open-source/
+# Example of statically linking libraries and linking openssl
+# https://gist.github.com/rjeczalik/7057434
+# Help on statically linking with when using centos
+# https://forum.nginx.org/read.php?2,245652,245722#msg-245722
+# Notes on GNU shared libraries needed to resolve getpwnam error
+# http://blog.oddbit.com/2015/02/05/creating-minimal-docker-images/
+- name: Create container
+  hosts: localhost
+  vars:
+    docker_hostname: nginx-binary-builder
+
+  tasks:
+
+    - name: Create container
+      docker_container:
+        name: "{{ docker_hostname }}"
+        image: "ubuntu:16.04"
+        # image: "centos:7"
+        command: /sbin/init
+        state: started
+
+    - name: Add to hosts
+      add_host: "name={{ docker_hostname }}"
+
+    - name: Install python
+      raw: "apt-get update && apt-get install -y python"
+      # raw: "yum install -y python"
+      delegate_to: "{{ docker_hostname }}"
+      connection: docker
+
+- name: Build nginx binary
+  hosts: nginx-binary-builder
+  connection: docker
+
+  vars:
+    docker_hostname: nginx-binary-builder
+    build_targets:
+      - url: ftp://ftp.csx.cam.ac.uk/pub/software/programming/pcre/pcre-8.39.tar.gz
+        checksum: md5:26a76d97e04c89fe9ce22ecc1cd0b315
+        filepath: /tmp/pcre-8.39.tar.gz
+        dest_dir: /tmp/pcre-8.39
+        make: "ls"
+        # make: >
+        #   ./configure
+        #   && make
+        #   && make install
+      - url: http://zlib.net/zlib-1.2.10.tar.gz
+        checksum: md5:d9794246f853d15ce0fcbf79b9a3cf13
+        filepath: /tmp/zlib-1.2.10.tar.gz
+        dest_dir: /tmp/zlib-1.2.10
+        make: "ls"
+        # make: >
+        #   ./configure
+        #   && make
+        #   && make install
+      - url: http://www.openssl.org/source/openssl-1.1.0c.tar.gz
+        checksum: md5:601e8191f72b18192a937ecf1a800f3f.
+        filepath: /tmp/openssl-1.1.0c.tar.gz
+        dest_dir: /tmp/openssl-1.1.0c
+        make: "ls"
+        # make: >
+        #   ./config
+        #   && make
+        #   && make install
+      - url: http://nginx.org/download/nginx-1.10.2.tar.gz
+        checksum: md5:e8f5f4beed041e63eb97f9f4f55f3085.
+        filepath: /tmp/nginx-1.10.2.tar.gz
+        dest_dir: /tmp/nginx-1.10.2
+        make: "
+          ./configure
+            --user=nginx
+            --group=nginx
+            --prefix=/etc/nginx
+            --sbin-path=/usr/sbin/nginx
+            --conf-path=/etc/nginx/nginx.conf
+            --pid-path=/var/run/nginx.pid
+            --lock-path=/var/run/nginx.lock
+            --error-log-path=/var/log/nginx/error.log
+            --http-log-path=/var/log/nginx/access.log
+            --with-cc-opt='-static -static-libgcc'
+            --with-ld-opt='-static'
+            --with-cpu-opt=generic
+            --with-zlib=/tmp/zlib-1.2.10
+            --with-pcre=/tmp/pcre-8.39
+            --with-openssl=/tmp/openssl-1.1.0c
+          && make -j1
+          && make install
+          "
+
+  tasks:
+    - name: Install Build Essentials
+      package:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - build-essential
+        # - "@Development tools"
+        - man
+        - wget
+        # http://rnowling.github.io/software/engineering/2015/05/05/static-compilation-dependencies.html
+        # - glibc-static
+        # - libstdc++-static
+
+
+    - name: Download files
+      get_url:
+        url: "{{ item.url }}"
+        dest: "{{ item.filepath }}"
+        checksum: "{{ item.checksum }}"
+      with_items: "{{ build_targets }}"
+
+    - name: Decompress files
+      unarchive:
+        src: "{{ item.filepath }}"
+        dest: /tmp/
+        remote_src: yes
+      with_items: "{{ build_targets }}"
+
+    - name: Make projects
+      shell: "{{ item.make }}"
+      args:
+        chdir: "{{ item.dest_dir }}"
+      with_items: "{{ build_targets }}"
+
+    - name: Create output dir
+      local_action: file path=files state=directory
+
+    - name: Copy nginx binary and conf
+      local_action: "
+        command docker cp
+        {{ docker_hostname }}:/usr/sbin/nginx
+        bin
+        "
